@@ -1,0 +1,477 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: flink
+data:
+  base-config: |+
+    kafka {
+        broker-servers = "{{ .Values.kafka_host }}:9092"
+        producer.broker-servers = "{{ .Values.kafka_host }}:9092"
+        consumer.broker-servers = "{{ .Values.kafka_host }}:9092"
+        zookeeper = "{{ .Values.zookeeper_host }}:2181"
+        producer {
+          max-request-size = 1572864
+          batch.size = 98304
+          linger.ms = 10
+        }
+      }
+      job {
+        env = "dev"
+        enable.distributed.checkpointing = false
+        statebackend {
+          blob {
+            storage {
+              account = "{{ .Values.cloud_storage_key }}.blob.core.windows.net"
+              container = "{{ .Values.cloud_storage_flink_bucketname }}"
+              checkpointing.dir = "checkpoint"
+            }
+          }
+          base.url = "wasbs://"${job.statebackend.blob.storage.container}"@"${job.statebackend.blob.storage.account}"/"${job.statebackend.blob.storage.checkpointing.dir}
+        }
+      }
+      task {
+        parallelism = 1
+        consumer.parallelism = 1
+        checkpointing.compressed = true
+        checkpointing.interval = 60000
+        checkpointing.pause.between.seconds = 5000
+        restart-strategy.attempts = 3
+        restart-strategy.delay = 30000 # in milli-seconds
+      }
+      redisdb.connection.timeout = 30000
+      redis {
+        host = {{ .Values.redis_host }}
+        port = 6379
+      }
+      redis-meta {
+        host = {{ .Values.redis_host }}
+        port = 6379
+      }
+      lms-cassandra {
+        host = {{ .Values.cassandra_host }}
+        port = "9042"
+        isMultiDCEnabled = false
+      }
+      neo4j {
+        routePath = "bolt://{{ .Values.neo4j_host }}:7687"
+        graph = "domain"
+      }
+      es {
+        basePath = "{{ .Values.elasticsearch_host }}:9200"
+      }
+      schema {
+        basePath = "https://{{ .Values.cloud_storage_key }}.blob.core.windows.net/contents/schemas/local"
+        supportedVersion = {
+          itemset = "2.0"
+        }
+      }
+  
+  {{ if eq .Release.Name "activity-aggregate-updater" }}
+
+  activity-aggregate-updater: |+
+    include file("/data/flink/conf/base-config.conf")
+    kafka {
+      input.topic = coursebatch.job.request
+      output.audit.topic = telemetry.raw
+      output.failed.topic = activity.agg.failed
+      output.certissue.topic = issue.certificate.request
+      groupId = activity-aggregate-group
+    }
+    task {
+      window.shards = 1000
+      checkpointing.interval = 300000
+      checkpointing.pause.between.seconds = 90000
+      restart-strategy.attempts = 3 # max 3 restart attempts
+      restart-strategy.delay = 240000 # in milli-seconds # on max restarts (3) within 4 min the job will fail.
+      consumer.parallelism = 1
+      dedup.parallelism = 1
+      activity.agg.parallelism = 1
+      enrolment.complete.parallelism = 1
+    }
+    lms-cassandra {
+      keyspace = "sunbird_courses"
+      consumption.table = "user_content_consumption"
+      user_activity_agg.table = "user_activity_agg"
+      user_enrolments.table = "user_enrolments"
+    }
+    redis {
+      database {
+        relationCache.id = 10
+      }
+    }
+    dedup-redis {
+      host = "{{ .Values.redis_host }}"
+      port = 6379
+      database.index = 13
+      database.expiry = 604800
+    }
+    threshold.batch.read.interval = 60
+    threshold.batch.read.size = 1
+    threshold.batch.write.size = 10
+    activity {
+      module.aggs.enabled = true
+      input.dedup.enabled = true
+      filter.processed.enrolments = true
+      collection.status.cache.expiry = 3600
+    }
+    service {
+      search.basePath = "http://{{ .Values.private_ingress_ip }}/search"
+    }
+
+
+  flink-conf: |+
+    jobmanager.memory.flink.size: 1024m
+    taskmanager.memory.flink.size: 1024m
+    taskmanager.numberOfTaskSlots: 1
+    parallelism.default: 1
+    jobmanager.execution.failover-strategy: region
+    taskmanager.memory.network.fraction: 0.1
+  {{- end }}
+
+  {{ if eq .Release.Name "relation-cache-updater" }}
+
+  relation-cache-updater: |+
+    include file("/data/flink/conf/base-config.conf")
+    kafka {
+      input.topic = content.postpublish.request
+      groupId = relation-cache-updater-group
+    }
+    task {
+      consumer.parallelism = 1
+      parallelism = 1
+    }
+    lms-cassandra {
+          keyspace = "hierarchy_store"
+          table = "content_hierarchy"
+    }
+    redis {
+      database.index = 10
+    }
+    dp-redis {
+      host = {{ .Values.redis_host }}
+      port = 6379
+      database.index = 5
+    }
+
+  flink-conf: |+
+    jobmanager.memory.flink.size: 1024m
+    taskmanager.memory.flink.size: 1024m
+    taskmanager.numberOfTaskSlots: 1
+    parallelism.default: 1
+    jobmanager.execution.failover-strategy: region
+    taskmanager.memory.network.fraction: 0.1
+  {{- end }}
+
+  {{ if eq .Release.Name "enrolment-reconciliation" }}
+
+  enrolment-reconciliation: |+
+    include file("/data/flink/conf/base-config.conf")
+    kafka {
+      input.topic = batch.enrolment.sync.request
+      output.audit.topic = telemetry.raw
+      output.failed.topic = activity.agg.failed
+      output.certissue.topic = issue.certificate.request
+      groupId = enrolment-reconciliation-group
+    }
+    task {
+      restart-strategy.attempts = 3 # max 3 restart attemptscert_container_name
+      restart-strategy.delay = 240000 # in milli-seconds # on max restarts (3) within 4 min the job will fail.
+      consumer.parallelism = 1
+      enrolment.reconciliation.parallelism = 1
+      enrolment.complete.parallelism = 1
+    }
+    lms-cassandra {
+      keyspace = "sunbird_courses"
+      consumption.table = "user_content_consumption"
+      user_activity_agg.table = "user_activity_agg"
+      user_enrolments.table = "user_enrolments"
+    }
+    redis {
+      database {
+        relationCache.id = 10
+      }
+    }
+    threshold.batch.write.size = 10
+    activity {
+      module.aggs.enabled = true
+      collection.status.cache.expiry = 3600
+    }
+    service {
+      search.basePath = "http://{{ .Values.private_ingress_ip }}/search"
+    }
+
+ 
+  flink-conf: |+
+    jobmanager.memory.flink.size: 1024m
+    taskmanager.memory.flink.size: 1024m
+    taskmanager.numberOfTaskSlots: 1
+    parallelism.default: 1
+    jobmanager.execution.failover-strategy: region
+    taskmanager.memory.network.fraction: 0.1
+
+  {{- end }}
+
+  {{ if eq .Release.Name "collection-cert-pre-processor" }}
+
+  collection-cert-pre-processor: |+
+    include file("/data/flink/conf/base-config.conf")
+    kafka {
+      input.topic = issue.certificate.request
+      output.topic = generate.certificate.request
+      output.failed.topic = issue.certificate.failed
+      groupId = collection-cert-pre-processor-group
+    }
+    task {
+      restart-strategy.attempts = 3 # max 3 restart attempts
+      restart-strategy.delay = 240000 # in milli-seconds # on max restarts (3) within 4 min the job will fail.
+      parallelism = 1
+      consumer.parallelism = 1
+      generate_certificate.parallelism = 1
+    }
+    lms-cassandra {
+      keyspace = "sunbird_courses"
+      consumption.table = "user_content_consumption"/obj.stage.sunbirded.org
+      user_enrolments.table = "user_enrolments"
+      course_batch.table = "course_batch"
+      assessment_aggregator.table = "assessment_aggregator"
+      user_activity_agg.table = "user_activity_agg"
+    }
+    cert_domain_url = "https://{{ .Values.domain }}"
+    user_read_api = "/private/user/v1/read"
+    content_read_api = "/content/v3/read"
+    service {
+      content.basePath = "http://{{ .Values.private_ingress_ip }}/content"
+      learner.basePath = "http://{{ .Values.private_ingress_ip }}/learner"
+    }
+    enable.suppress.exception = false
+    redis-meta {
+      host = {{ .Values.redis_host }}
+      port = 6379
+    }
+    assessment.metrics.supported.contenttype = ["SelfAssess"]
+    cloud_storage_base_url = "{{ .Values.cloud_storage_base_url }}"
+    cloud_store_base_path_placeholder = "CLOUD_BASE_PATH"
+    content_cloud_storage_container = "{{ .Values.cloud_storage_content_bucketname }}"
+    cloud_storage_cname_url = "{{ .Values.cloud_storage_base_url }}"
+
+  flink-conf: |+
+    jobmanager.memory.flink.size: 1024m
+    taskmanager.memory.flink.size: 1024m
+    taskmanager.numberOfTaskSlots: 1
+    parallelism.default: 1
+    jobmanager.execution.failover-strategy: region
+    taskmanager.memory.network.fraction: 0.1
+  {{- end }}  
+
+  {{ if eq .Release.Name "collection-certificate-generator" }}
+
+  collection-certificate-generator: |+
+    include file("/data/flink/conf/base-config.conf")
+    kafka {
+      input.topic = generate.certificate.request
+      output.audit.topic = telemetry.raw
+      groupId = certificate-generator-group
+    }
+    task {
+      restart-strategy.attempts = 3 # max 3 restart attempts
+      restart-strategy.delay = 240000 # in milli-seconds # on max restarts (3) within 4 min the job will fail.
+      consumer.parallelism = 1
+      parallelism = 1
+    }
+    lms-cassandra {
+      keyspace = "sunbird_courses"
+      user_enrolments.table = "user_enrolments"
+      course_batch.table = "course_batch"
+      sbkeyspace = "sunbird"
+      certreg.table ="cert_registry"
+    }
+    cert_domain_url = "https://{{ .Values.domain }}"
+    cert_container_name = "{{ .Values.cert_container_name }}"
+    cert_cloud_storage_type = "{{ .Values.cloud_service_provider }}"
+    cert_cloud_storage_secret = "{{ .Values.cloud_private_storage_accountname }}"
+    cert_cloud_storage_key = "{{ .Values.cloud_private_storage_secret }}"
+    cloud_storage_base_url = "{{ .Values.cloud_storage_base_url }}"
+    cloud_store_base_path_placeholder = "CLOUD_BASE_PATH"
+    content_cloud_storage_container = "{{ .Values.cloud_storage_content_bucketname }}"
+    cloud_storage_cname_url = "{{ .Values.cloud_storage_base_url }}"
+    service {
+      certreg.basePath = "http://{{ .Values.private_ingress_ip }}/certreg"
+      learner.basePath = "http://{{ .Values.private_ingress_ip }}/learner"
+      enc.basePath = "http://{{ .Values.private_ingress_ip }}/enc"
+      rc.basePath = "http://{{ .Values.private_ingress_ip }}/cert"
+      rc.entity = "TrainingCertificate"
+    }
+    enable.suppress.exception = false
+    enable.rc.certificate = false
+    task.rc.badcharlist = false
+
+
+  flink-conf: |+
+    jobmanager.memory.flink.size: 1024m
+    taskmanager.memory.flink.size: 1024m
+    taskmanager.numberOfTaskSlots: 1
+    parallelism.default: 1
+    jobmanager.execution.failover-strategy: region
+    taskmanager.memory.network.fraction: 0.1
+  {{- end }}
+
+  {{ if eq .Release.Name "merge-user-courses" }}
+
+  merge-user-courses: |+
+    include file("/data/flink/conf/base-config.conf")
+    kafka {
+      input.topic = lms.user.account.merge
+      output.failed.topic = learning.events.failed
+      groupId = merge-courses-group
+      output.course.batch.updater.topic = coursebatch.job.request
+    }
+    task {
+      consumer.parallelism = 1
+      parallelism = 1
+      course_batch_updater.parallelism = 1
+    }
+    lms-cassandra {
+      keyspace = "sunbird_courses"
+      content_consumption.table = "user_content_consumption"
+      user_enrolments.table = "user_enrolments"
+      user_activity_agg.table = "user_activity_agg"
+    }
+    course.date.format = "yyyy-MM-dd HH:mm:ss:SSSZ"
+
+  flink-conf: |+
+    jobmanager.memory.flink.size: 1024m
+    taskmanager.memory.flink.size: 1024m
+    taskmanager.numberOfTaskSlots: 1
+    parallelism.default: 1
+    jobmanager.execution.failover-strategy: region
+    taskmanager.memory.network.fraction: 0.1
+  {{- end }}
+  {{ if eq .Release.Name "assessment-aggregator" }}
+
+  assessment-aggregator: |+
+    include file("/data/flink/conf/base-config.conf")
+    kafka {
+      producer.broker-servers = "{{ .Values.kafka_host }}:9092"
+      consumer.broker-servers = "{{ .Values.kafka_host }}:9092"
+      zookeeper = "{{ .Values.zookeeper_host }}:2181"
+      input.topic = telemetry.assess
+      failed.topic= telemetry.assess.failed
+      groupId = assessment-aggregator-group
+      output.certissue.topic = issue.certificate.request
+    }
+    task {
+      consumer.parallelism = 1
+      downstream.parallelism = 1
+      assessaggregator {
+        parallelism = 1
+      }
+      scoreaggregator.parallelism = 1
+    }
+    lms-cassandra {
+      keyspace = "sunbird_courses"
+      table = "assessment_aggregator"
+      questionudttype= "question"
+      enrolmentstable = "user_enrolments"
+      activitytable = "user_activity_agg"
+    }
+    redis {
+      database {
+        relationCache.id = 10
+        contentCache.id = 5
+      }
+    }
+    assessment.skip.missingRecords = true
+    content.read.api = "https://{{ .Values.domain }}/api/content/v1/read/"
+    user.activity.agg.type="attempt_metrics"
+
+  flink-conf: |+
+    jobmanager.memory.flink.size: 1024m
+    taskmanager.memory.flink.size: 1024m
+    taskmanager.numberOfTaskSlots: 1
+    parallelism.default: 1
+    jobmanager.execution.failover-strategy: region
+    taskmanager.memory.network.fraction: 0.1
+
+  {{- end }}
+
+  {{ if eq .Release.Name "notification-job" }}
+
+  notification-job: |+
+    include file("/data/flink/conf/base-config.conf")
+    kafka {
+      input.topic = lms.notification
+      groupId = lms-notification
+    }
+    task {
+      restart-strategy.attempts = 3 # max 3 restart attempts
+      restart-strategy.delay = 240000 # in milli-seconds # on max restarts (3) within 4 min the job will fail.
+      consumer.parallelism = 1
+      parallelism = 1
+    }
+    fcm_account_key= "{{ .Values.core_vault_sunbird_fcm_account_key }}"
+    sms_auth_key= "{{ .Values.sunbird_msg_91_auth}}"
+    mail_server_from_email= "{{ .Values.sunbird_mail_server_from_email}}"
+    sms_default_sender= "{{ .Values.sunbird_notification_msg_default_sender}}"
+    mail_server_username= "{{ .Values.sunbird_mail_server_username}}"
+    mail_server_password= "{{ .Values.sunbird_mail_server_password}}"
+    mail_server_host= "{{ .Values.sunbird_mail_server_host}}"
+    mail_server_port= "{{ .Values.sunbird_mail_server_port}}"
+
+  flink-conf: |+
+    jobmanager.memory.flink.size: 1024m
+    taskmanager.memory.flink.size: 1024m
+    taskmanager.numberOfTaskSlots: 1
+    parallelism.default: 1
+    jobmanager.execution.failover-strategy: region
+    taskmanager.memory.network.fraction: 0.1
+  {{- end }}
+  
+  {{ if eq .Release.Name "user-cache-updater-v2" }}
+
+  user-cache-updater-v2: |+
+    include file("/data/flink/conf/base-config.conf")
+    kafka {
+      input.topic = "telemetry.audit"
+      groupId = "user-cache-updater-group"
+    }
+    task {
+      restart-strategy.attempts = 3 # max 3 restart attempts
+      restart-strategy.delay = 240000 # in milli-seconds # on max restarts (3) within 4 min the job will fail.
+      consumer.parallelism = 1
+      parallelism = 1
+      usercache.updater.parallelism = 1
+    }
+    regd.user.producer.pid = "learner-service"
+    user.self.signin.types = ["google","self"]
+    user.validated.types = ["sso"]
+    user.self.signin.key = "Self-Signed-In"
+    user.valid.key = "Validated"
+    user.read.url.fields = "locations,organisations"
+    user.read.api.error = ["CLIENT_ERROR"]
+    # redis-metadata
+    redis-meta {
+      database {
+        userstore.id = 12
+        key.expiry.seconds = 3600
+      }
+    }
+    #(user read api details)
+    user-read.api.url = "{{ .Values.user_read_api_url }}"
+
+  flink-conf: |+
+    jobmanager.memory.flink.size: 1024m
+    taskmanager.memory.flink.size: 1024m
+    taskmanager.numberOfTaskSlots: 1
+    parallelism.default: 1
+    jobmanager.execution.failover-strategy: region
+    taskmanager.memory.network.fraction: 0.1
+   
+  {{- end }}
+
+
+  log4j_console_properties: |+
+{{ .Values.log4j_console_properties | indent 4 }} 

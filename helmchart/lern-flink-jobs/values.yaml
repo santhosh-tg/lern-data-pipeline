@@ -1,0 +1,102 @@
+imagepullsecrets: ""
+image:
+  registry: sunbirded.azurecr.io
+  repository: data-pipeline
+  tag: release-5.2.0_RC1_2c615f8_12
+
+# Azure Container Details
+checkpoint_store_type: "azure"
+cloud_storage_flink_bucketname: flink-state-backend
+cloud_storage_content_bucketname: sunbird-content-dev
+cert_container_name: dev-e-credentials
+
+kafka_host: kafka.dev.svc.cluster.local
+zookeeper_host: kafka-zookeeper.dev.svc.cluster.local
+elasticsearch_host: elasticsearch.dev.svc.cluster.local
+cassandra_host: cassandra.dev.svc.cluster.local
+neo4j_host: neo4j.dev.svc.cluster.local
+redis_host: redis-master.dev.svc.cluster.local
+
+user_read_api_url: "http://{{private_ingressgateway_ip}}/learner/private/user/v1/read/"
+
+serviceMonitor:
+  enabled: false
+
+replicaCount: 1
+
+jobmanager:
+  rpc_port: 6123
+  blob_port: 6124
+  query_port: 6125
+  ui_port: 8081
+  prom_port: 9250
+  heap_memory: 1024
+
+
+rest_port: 80
+resttcp_port: 8081
+
+taskmanager:
+  prom_port: 9251 
+  rpc_port: 6122
+  heap_memory: 1024
+  replicas: 1
+  cpu_requests: 300Mi
+
+job_classname: ""
+
+taskmanager_liveness:
+  livenessProbe:
+    tcpSocket:
+      port: 6122
+    initialDelaySeconds: 30
+    periodSeconds: 60
+
+service:
+  type: LoadBalancer
+  annotations:
+    service.beta.kubernetes.io/azure-load-balancer-internal: "true"
+
+log4j_console_properties: |
+  # This affects logging for both user code and Flink
+  rootLogger.level = INFO
+  rootLogger.appenderRef.console.ref = ConsoleAppender
+
+  # Uncomment this if you want to _only_ change Flink's logging
+  #logger.flink.name = org.apache.flink
+  #logger.flink.level = INFO
+
+  # The following lines keep the log level of common libraries/connectors on
+  # log level INFO. The root logger does not override this. You have to manually
+  # change the log levels here.
+  logger.akka.name = akka
+  logger.akka.level = INFO
+  logger.kafka.name= org.apache.kafka
+  logger.kafka.level = INFO
+  logger.hadoop.name = org.apache.hadoop
+  logger.hadoop.level = INFO
+  logger.zookeeper.name = org.apache.zookeeper
+  logger.zookeeper.level = INFO
+
+  # Log all infos to the console
+  appender.console.name = ConsoleAppender
+  appender.console.type = CONSOLE
+  appender.console.layout.type = PatternLayout
+  appender.console.layout.pattern = %d{yyyy-MM-dd HH:mm:ss,SSS} %-5p %-60c %x - %m%n
+
+  # Suppress the irrelevant (wrong) warnings from the Netty channel handler
+  logger.netty.name = org.apache.flink.shaded.akka.org.jboss.netty.channel.DefaultChannelPipeline
+  logger.netty.level = OFF
+
+
+
+activity_aggregate_updater_job_classname: org.sunbird.job.aggregate.task.ActivityAggregateUpdaterStreamTask
+relation_cache_updater_job_classname: org.sunbird.job.relationcache.task.RelationCacheUpdaterStreamTask
+enrolment_reconciliation_job_classname: org.sunbird.job.recounciliation.task.EnrolmentReconciliationStreamTask
+collection_cert_pre_processor_job_classname: org.sunbird.job.collectioncert.task.CollectionCertPreProcessorTask
+collection_certificate_generator_job_classname: org.sunbird.job.certgen.task.CertificateGeneratorStreamTask
+merge_user_courses_job_classname: org.sunbird.job.merge.user.courses.task.MergeUserCoursesStreamTask
+assessment_aggregator_job_classname: org.sunbird.dp.assessment.task.AssessmentAggregatorStreamTask
+notification_job_classname: org.sunbird.job.notification.task.NotificationStreamTask
+user_cache_updater_v2_job_classname: org.sunbird.dp.usercache.task.UserCacheUpdaterStreamTaskV2 
+# not in dev and staging, check with Lern team and confirm
